@@ -33,21 +33,14 @@ import pascal.taie.analysis.graph.cfg.CFGBuilder;
 import pascal.taie.analysis.graph.cfg.Edge;
 import pascal.taie.config.AnalysisConfig;
 import pascal.taie.ir.IR;
-import pascal.taie.ir.exp.ArithmeticExp;
-import pascal.taie.ir.exp.ArrayAccess;
-import pascal.taie.ir.exp.CastExp;
-import pascal.taie.ir.exp.FieldAccess;
-import pascal.taie.ir.exp.NewExp;
-import pascal.taie.ir.exp.RValue;
-import pascal.taie.ir.exp.Var;
+import pascal.taie.ir.exp.*;
 import pascal.taie.ir.stmt.AssignStmt;
 import pascal.taie.ir.stmt.If;
 import pascal.taie.ir.stmt.Stmt;
 import pascal.taie.ir.stmt.SwitchStmt;
+import pascal.taie.util.collection.Pair;
 
-import java.util.Comparator;
-import java.util.Set;
-import java.util.TreeSet;
+import java.util.*;
 
 public class DeadCodeDetection extends MethodAnalysis {
 
@@ -69,8 +62,85 @@ public class DeadCodeDetection extends MethodAnalysis {
                 ir.getResult(LiveVariableAnalysis.ID);
         // keep statements (dead code) sorted in the resulting set
         Set<Stmt> deadCode = new TreeSet<>(Comparator.comparing(Stmt::getIndex));
-        // TODO - finish me
         // Your task is to recognize dead code in ir and add it to deadCode
+        Map<Stmt, Boolean> visited = new HashMap<>();
+        for (Stmt node : cfg) {
+            visited.put(node, false);
+        }
+        Queue<Stmt> q = new ArrayDeque<>();
+        q.add(cfg.getEntry());
+        visited.put(cfg.getEntry(), true);
+        while (!q.isEmpty()) {
+            Stmt p = q.poll();
+            if (p instanceof If ifStmt) {
+                Value condition = ConstantPropagation.evaluate(ifStmt.getCondition(), constants.getInFact(p));
+                if (condition.isConstant()) { //如果 if语句的条件是一个（可判断的）常量
+                    if (condition.getConstant() == 1) {//如果 是true常量
+                        //那么 if语句的true分支不是dead code
+                        if (!visited.get(ifStmt.getTarget())) {
+                            q.add(ifStmt.getTarget());
+                            visited.put(ifStmt.getTarget(), true);
+                        }
+                    } else {//如果 是false常量
+                        //那么 if语句的false分支不是dead code
+                        cfg.getOutEdgesOf(p).forEach(edge -> {
+                            if (edge.getKind() == Edge.Kind.IF_FALSE) {
+                                if (!visited.get(edge.getTarget())) {
+                                    q.add(edge.getTarget());
+                                    visited.put(edge.getTarget(), true);
+                                }
+                            }
+                        });
+                    }
+                    continue;
+                }
+            } else if (p instanceof SwitchStmt switchStmt) {
+                Value condition = ConstantPropagation.evaluate(switchStmt.getVar(), constants.getInFact(p));
+                if (condition.isConstant()) {//如果 switch语句的条件是一个（可判断的）常量
+                    List<Pair<Integer, Stmt>> cases = switchStmt.getCaseTargets();
+                    boolean found = false;
+                    for (Pair<Integer, Stmt> c : cases) {
+                        if (c.first() == condition.getConstant()) {//如果 该常量是某个case之一，标记该case分支为非dead code
+                            if (!visited.get(c.second())) {
+                                q.add(c.second());
+                                visited.put(c.second(), true);
+                            }
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {//否则 标记default分支为非dead code
+                        if (!visited.get(switchStmt.getDefaultTarget())) {
+                            q.add(switchStmt.getDefaultTarget());
+                            visited.put(switchStmt.getDefaultTarget(), true);
+                        }
+                    }
+                    continue;
+                }
+            } else if (p instanceof AssignStmt<?, ?> assignStmt) {
+                LValue lValue = assignStmt.getLValue();
+                if (lValue instanceof Var lVar) {
+                    if (!liveVars.getOutFact(p).contains(lVar)) {
+                        if (hasNoSideEffect(assignStmt.getRValue())) {
+                            deadCode.add(p);
+                        }
+                    }
+                }
+            }
+            cfg.getOutEdgesOf(p).forEach(edge -> {
+                if (!visited.get(edge.getTarget())) {
+                    q.add(edge.getTarget());
+                    visited.put(edge.getTarget(), true);
+                }
+            });
+        }
+        for (Stmt node : cfg) {
+            if (node != cfg.getExit()) {
+                if (!visited.get(node)) {
+                    deadCode.add(node);
+                }
+            }
+        }
         return deadCode;
     }
 
